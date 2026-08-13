@@ -1,0 +1,16 @@
+# Rust build output
+/target/
+
+# Locally packaged release binaries (publish these through GitHub Releases)
+/dist/
+
+# IDE and OS files
+/.vs/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+
+# Debug symbols and crash dumps
+*.pdb
+*.dmp
