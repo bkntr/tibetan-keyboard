@@ -8,6 +8,7 @@ Type familiar Latin characters in any application and the keyboard converts them
 
 - Types Unicode Tibetan system-wide in Windows applications
 - Converts EWTS incrementally, including stacked letters and backspace corrections
+- Follows the active Windows keyboard layout, including AZERTY and QWERTZ
 - Toggles on and off with a global, customizable hotkey
 - Shows the current input state in the Windows system tray
 - Runs as a portable executable—no installation required

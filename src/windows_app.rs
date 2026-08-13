@@ -19,13 +19,15 @@ use windows_sys::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-            KEYEVENTF_UNICODE, SendInput, VK_BACK, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+            GetKeyState, GetKeyboardLayout, HKL, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+            KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyExW, SendInput,
+            ToUnicodeEx, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+            VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, MB_ICONERROR, MB_OK, MessageBoxW,
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-            WM_SYSKEYDOWN, WM_SYSKEYUP,
+            CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT,
+            LLKHF_EXTENDED, MB_ICONERROR, MB_OK, MessageBoxW, SetWindowsHookExW,
+            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
 };
@@ -50,8 +52,93 @@ enum UserEvent {
 struct HookRuntime {
     composer: Composer,
     hotkey_matcher: HotkeyMatcher,
+    keyboard_state: KeyboardState,
+    consumed_keys: [bool; 256],
     enabled: bool,
     proxy: EventLoopProxy<UserEvent>,
+}
+
+#[derive(Clone)]
+struct KeyboardState {
+    keys: [u8; 256],
+}
+
+impl KeyboardState {
+    fn new() -> Self {
+        let mut keys = [0; 256];
+        // SAFETY: VK_CAPITAL is a documented virtual-key value.
+        if unsafe { GetKeyState(VK_CAPITAL as i32) } & 1 != 0 {
+            keys[VK_CAPITAL as usize] = 1;
+        }
+        Self { keys }
+    }
+
+    fn update(&mut self, key: u16, is_down: bool) {
+        let Some(state) = self.keys.get_mut(key as usize) else {
+            return;
+        };
+        let was_down = *state & 0x80 != 0;
+        if key == VK_CAPITAL && is_down && !was_down {
+            *state ^= 1;
+        }
+        *state = (*state & 1) | if is_down { 0x80 } else { 0 };
+
+        match key {
+            VK_LSHIFT | VK_RSHIFT => self.refresh_aggregate(VK_SHIFT, VK_LSHIFT, VK_RSHIFT),
+            VK_LCONTROL | VK_RCONTROL => {
+                self.refresh_aggregate(VK_CONTROL, VK_LCONTROL, VK_RCONTROL)
+            }
+            VK_LMENU | VK_RMENU => self.refresh_aggregate(VK_MENU, VK_LMENU, VK_RMENU),
+            _ => {}
+        }
+    }
+
+    fn refresh_aggregate(&mut self, aggregate: u16, left: u16, right: u16) {
+        let is_down = self.is_down(left) || self.is_down(right);
+        let toggle = self.keys[aggregate as usize] & 1;
+        self.keys[aggregate as usize] = toggle | if is_down { 0x80 } else { 0 };
+    }
+
+    fn is_down(&self, key: u16) -> bool {
+        self.keys
+            .get(key as usize)
+            .is_some_and(|state| state & 0x80 != 0)
+    }
+
+    fn modifiers(&self) -> Modifiers {
+        Modifiers {
+            ctrl: self.is_down(VK_CONTROL)
+                || self.is_down(VK_LCONTROL)
+                || self.is_down(VK_RCONTROL),
+            alt: self.is_down(VK_MENU) || self.is_down(VK_LMENU) || self.is_down(VK_RMENU),
+            shift: self.is_down(VK_SHIFT) || self.is_down(VK_LSHIFT) || self.is_down(VK_RSHIFT),
+            win: self.is_down(VK_LWIN) || self.is_down(VK_RWIN),
+        }
+    }
+
+    fn for_modifiers(&self, modifiers: Modifiers) -> Self {
+        let mut state = self.clone();
+        for key in [
+            VK_SHIFT,
+            VK_LSHIFT,
+            VK_RSHIFT,
+            VK_CONTROL,
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_MENU,
+            VK_LMENU,
+            VK_RMENU,
+            VK_LWIN,
+            VK_RWIN,
+        ] {
+            state.keys[key as usize] &= 1;
+        }
+        state.update(VK_SHIFT, modifiers.shift);
+        state.update(VK_CONTROL, modifiers.ctrl);
+        state.update(VK_MENU, modifiers.alt);
+        state.update(VK_LWIN, modifiers.win);
+        state
+    }
 }
 
 enum SynthAction {
@@ -84,6 +171,8 @@ impl Application {
             .set(Mutex::new(HookRuntime {
                 composer: Composer::default(),
                 hotkey_matcher: HotkeyMatcher::new(hotkey),
+                keyboard_state: KeyboardState::new(),
+                consumed_keys: [false; 256],
                 enabled: config.enabled_on_start,
                 proxy,
             }))
@@ -359,9 +448,13 @@ unsafe extern "system" fn low_level_keyboard_proc(
     let mut suppress = false;
     {
         let mut runtime = runtime_mutex.lock().expect("hook runtime poisoned");
-        let modifiers = current_modifiers();
         let key = event.vkCode as u16;
+        let modifiers = runtime.keyboard_state.modifiers();
         let hotkey_match = runtime.hotkey_matcher.handle(key, is_down, modifiers);
+        runtime.keyboard_state.update(
+            normalized_state_key(key, event.scanCode, event.flags),
+            is_down,
+        );
         let mut process_normally = false;
         let mut reprocess_suppressed_event = false;
 
@@ -395,9 +488,12 @@ unsafe extern "system" fn low_level_keyboard_proc(
             }
         }
 
-        if process_normally && runtime.enabled {
-            let control_chord = modifiers.ctrl || modifiers.alt || modifiers.win;
-            let handled = if key == VK_BACK {
+        if process_normally {
+            let handled = if is_up && take_consumed_key(&mut runtime, key) {
+                true
+            } else if !runtime.enabled {
+                false
+            } else if key == VK_BACK {
                 if is_down {
                     if let Some(edit) = runtime.composer.backspace() {
                         actions.push(SynthAction::Replacement(edit));
@@ -408,26 +504,35 @@ unsafe extern "system" fn low_level_keyboard_proc(
                 } else {
                     !runtime.composer.is_empty()
                 }
-            } else if !control_chord {
-                match translate_virtual_key(event.vkCode, modifiers.shift) {
-                    KeyTranslation::Ewts(ch) => {
-                        if is_down {
-                            actions.push(SynthAction::Replacement(runtime.composer.push(ch)));
-                        }
-                        true
-                    }
-                    KeyTranslation::Suppress => true,
-                    KeyTranslation::Pass => {
-                        if is_down {
-                            runtime.composer.commit();
-                        }
-                        false
-                    }
-                }
-            } else {
+            } else if is_modifier_key(key) {
                 if is_down {
                     runtime.composer.commit();
                 }
+                false
+            } else if is_down && !is_shortcut_chord(&runtime.keyboard_state) {
+                match translate_key_for_active_layout(
+                    event.vkCode,
+                    event.scanCode,
+                    &runtime.keyboard_state,
+                ) {
+                    KeyTranslation::Ewts(ch) => {
+                        actions.push(SynthAction::Replacement(runtime.composer.push(ch)));
+                        mark_consumed_key(&mut runtime, key);
+                        true
+                    }
+                    KeyTranslation::Suppress => {
+                        mark_consumed_key(&mut runtime, key);
+                        true
+                    }
+                    KeyTranslation::Pass => {
+                        runtime.composer.commit();
+                        false
+                    }
+                }
+            } else if is_down {
+                runtime.composer.commit();
+                false
+            } else {
                 false
             };
 
@@ -435,8 +540,6 @@ unsafe extern "system" fn low_level_keyboard_proc(
             if reprocess_suppressed_event && !handled {
                 actions.push(SynthAction::RawKey { key, is_down });
             }
-        } else if process_normally && reprocess_suppressed_event {
-            actions.push(SynthAction::RawKey { key, is_down });
         }
     }
 
@@ -456,10 +559,15 @@ unsafe extern "system" fn low_level_keyboard_proc(
 fn queue_hotkey_replay(runtime: &mut HookRuntime, keys: Vec<u16>, actions: &mut Vec<SynthAction>) {
     let modifiers = runtime.hotkey_matcher.hotkey().modifiers;
     let control_chord = modifiers.ctrl || modifiers.alt || modifiers.win;
+    let keyboard_state = runtime.keyboard_state.for_modifiers(modifiers);
 
     for key in keys {
         if runtime.enabled && !control_chord {
-            match translate_virtual_key(key as u32, modifiers.shift) {
+            let layout = active_keyboard_layout();
+            // SAFETY: the layout belongs to the foreground thread and the map
+            // type requests a scan code for the supplied virtual key.
+            let scan_code = unsafe { MapVirtualKeyExW(key as u32, MAPVK_VK_TO_VSC_EX, layout) };
+            match translate_key(key as u32, scan_code, &keyboard_state, layout) {
                 KeyTranslation::Ewts(ch) => {
                     actions.push(SynthAction::Replacement(runtime.composer.push(ch)));
                     continue;
@@ -480,58 +588,133 @@ fn queue_hotkey_replay(runtime: &mut HookRuntime, keys: Vec<u16>, actions: &mut 
     }
 }
 
-fn current_modifiers() -> Modifiers {
-    // SAFETY: GetAsyncKeyState accepts these documented virtual-key constants.
-    unsafe {
-        Modifiers {
-            ctrl: GetAsyncKeyState(VK_CONTROL as i32) < 0,
-            alt: GetAsyncKeyState(VK_MENU as i32) < 0,
-            shift: GetAsyncKeyState(VK_SHIFT as i32) < 0,
-            win: GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0,
-        }
+fn mark_consumed_key(runtime: &mut HookRuntime, key: u16) {
+    if let Some(consumed) = runtime.consumed_keys.get_mut(key as usize) {
+        *consumed = true;
     }
 }
 
-fn translate_virtual_key(vk: u32, shift: bool) -> KeyTranslation {
-    if let Some(ch) = virtual_key_to_ewts(vk, shift) {
-        KeyTranslation::Ewts(ch)
-    } else if matches!(vk, 0x41..=0x5A) {
-        KeyTranslation::Suppress
-    } else {
-        KeyTranslation::Pass
-    }
+fn take_consumed_key(runtime: &mut HookRuntime, key: u16) -> bool {
+    let Some(consumed) = runtime.consumed_keys.get_mut(key as usize) else {
+        return false;
+    };
+    std::mem::take(consumed)
 }
 
-fn virtual_key_to_ewts(vk: u32, shift: bool) -> Option<char> {
-    match vk {
-        // Lowercase x is a convenient alias for EWTS underscore, which emits
-        // a regular word space. Shift+X retains its standard EWTS meaning.
-        0x58 if !shift => Some('_'),
-        0x41..=0x5A => {
-            let ch = char::from_u32(vk)?;
-            let ch = if shift { ch } else { ch.to_ascii_lowercase() };
-            is_supported_ewts_letter(ch).then_some(ch)
-        }
-        0x30..=0x39 => {
-            if shift {
-                Some(")!@#$%^&*(".chars().nth((vk - 0x30) as usize)?)
+fn is_modifier_key(key: u16) -> bool {
+    matches!(
+        key,
+        VK_SHIFT
+            | VK_LSHIFT
+            | VK_RSHIFT
+            | VK_CONTROL
+            | VK_LCONTROL
+            | VK_RCONTROL
+            | VK_MENU
+            | VK_LMENU
+            | VK_RMENU
+            | VK_LWIN
+            | VK_RWIN
+    )
+}
+
+fn normalized_state_key(key: u16, scan_code: u32, flags: u32) -> u16 {
+    match key {
+        VK_SHIFT => {
+            if scan_code & 0xff == 0x36 {
+                VK_RSHIFT
             } else {
-                char::from_u32(vk)
+                VK_LSHIFT
             }
         }
-        0x20 => Some(' '),
-        0xBA => Some(if shift { ':' } else { ';' }),
-        0xBB => Some(if shift { '+' } else { '=' }),
-        0xBC => Some(if shift { '<' } else { ',' }),
-        0xBD => Some(if shift { '_' } else { '-' }),
-        0xBE => Some(if shift { '>' } else { '.' }),
-        0xBF => Some(if shift { '?' } else { '/' }),
-        0xC0 => Some(if shift { '~' } else { '`' }),
-        0xDB => Some(if shift { '{' } else { '[' }),
-        0xDC => Some(if shift { '|' } else { '\\' }),
-        0xDD => Some(if shift { '}' } else { ']' }),
-        0xDE => Some(if shift { '"' } else { '\'' }),
-        _ => None,
+        VK_CONTROL => {
+            if flags & LLKHF_EXTENDED != 0 {
+                VK_RCONTROL
+            } else {
+                VK_LCONTROL
+            }
+        }
+        VK_MENU => {
+            if flags & LLKHF_EXTENDED != 0 {
+                VK_RMENU
+            } else {
+                VK_LMENU
+            }
+        }
+        _ => key,
+    }
+}
+
+fn is_shortcut_chord(state: &KeyboardState) -> bool {
+    let modifiers = state.modifiers();
+    let altgr = state.is_down(VK_RMENU);
+    modifiers.win || ((modifiers.ctrl || modifiers.alt) && !altgr)
+}
+
+fn active_keyboard_layout() -> HKL {
+    // SAFETY: the returned handles and thread IDs are only passed back to
+    // user32 for layout lookup; null foreground windows are explicitly handled.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let thread = if foreground.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, ptr::null_mut())
+        };
+        GetKeyboardLayout(thread)
+    }
+}
+
+fn translate_key_for_active_layout(
+    virtual_key: u32,
+    scan_code: u32,
+    state: &KeyboardState,
+) -> KeyTranslation {
+    translate_key(virtual_key, scan_code, state, active_keyboard_layout())
+}
+
+fn translate_key(
+    virtual_key: u32,
+    scan_code: u32,
+    state: &KeyboardState,
+    layout: HKL,
+) -> KeyTranslation {
+    let mut buffer = [0_u16; 8];
+    // Bit 2 prevents dead-key and other kernel keyboard state from being
+    // modified. If translation is ambiguous, the physical event is passed on.
+    let translated = unsafe {
+        ToUnicodeEx(
+            virtual_key,
+            scan_code,
+            state.keys.as_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            1 << 2,
+            layout,
+        )
+    };
+    if translated != 1 {
+        return KeyTranslation::Pass;
+    }
+
+    char::from_u32(buffer[0] as u32).map_or(KeyTranslation::Pass, classify_character)
+}
+
+fn classify_character(ch: char) -> KeyTranslation {
+    // Lowercase x is a convenient alias for EWTS underscore, which emits a
+    // regular word space. Uppercase X retains its standard EWTS meaning.
+    if ch == 'x' {
+        KeyTranslation::Ewts('_')
+    } else if ch.is_ascii_alphabetic() {
+        if is_supported_ewts_letter(ch) {
+            KeyTranslation::Ewts(ch)
+        } else {
+            KeyTranslation::Suppress
+        }
+    } else if ch == ' ' || ch.is_ascii_digit() || ch.is_ascii_punctuation() {
+        KeyTranslation::Ewts(ch)
+    } else {
+        KeyTranslation::Pass
     }
 }
 
@@ -590,27 +773,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_us_keyboard_ewts_characters() {
-        assert_eq!(virtual_key_to_ewts(0x54, false), Some('t'));
-        assert_eq!(virtual_key_to_ewts(0x54, true), Some('T'));
-        assert_eq!(virtual_key_to_ewts(0x32, true), Some('@'));
-        assert_eq!(virtual_key_to_ewts(0xBD, true), Some('_'));
-        assert_eq!(virtual_key_to_ewts(0xBF, false), Some('/'));
+    fn accepts_layout_translated_ewts_characters() {
+        assert_eq!(classify_character('t'), KeyTranslation::Ewts('t'));
+        assert_eq!(classify_character('T'), KeyTranslation::Ewts('T'));
+        assert_eq!(classify_character('@'), KeyTranslation::Ewts('@'));
+        assert_eq!(classify_character('&'), KeyTranslation::Ewts('&'));
+        assert_eq!(classify_character('1'), KeyTranslation::Ewts('1'));
     }
 
     #[test]
     fn lowercase_x_is_a_regular_word_space_alias() {
-        assert_eq!(
-            translate_virtual_key(0x58, false),
-            KeyTranslation::Ewts('_')
-        );
-        assert_eq!(translate_virtual_key(0x58, true), KeyTranslation::Ewts('X'));
+        assert_eq!(classify_character('x'), KeyTranslation::Ewts('_'));
+        assert_eq!(classify_character('X'), KeyTranslation::Ewts('X'));
     }
 
     #[test]
-    fn unsupported_latin_letters_are_suppressed() {
-        assert_eq!(translate_virtual_key(0x4C, true), KeyTranslation::Suppress);
-        assert_eq!(translate_virtual_key(0x51, false), KeyTranslation::Suppress);
-        assert_eq!(translate_virtual_key(0x09, false), KeyTranslation::Pass);
+    fn unsupported_or_non_ascii_layout_output_is_safe() {
+        assert_eq!(classify_character('L'), KeyTranslation::Suppress);
+        assert_eq!(classify_character('q'), KeyTranslation::Suppress);
+        assert_eq!(classify_character('\t'), KeyTranslation::Pass);
+        assert_eq!(classify_character('\u{00e9}'), KeyTranslation::Pass);
+    }
+
+    #[test]
+    fn hook_state_tracks_modifiers_before_windows_updates_async_state() {
+        let mut state = KeyboardState { keys: [0; 256] };
+        assert_eq!(state.modifiers(), Modifiers::default());
+
+        state.update(VK_LSHIFT, true);
+        assert!(state.modifiers().shift);
+        assert!(state.is_down(VK_SHIFT));
+        state.update(VK_LSHIFT, false);
+        assert!(!state.modifiers().shift);
+    }
+
+    #[test]
+    fn altgr_is_text_input_but_regular_control_chords_are_shortcuts() {
+        let mut state = KeyboardState { keys: [0; 256] };
+        state.update(VK_LCONTROL, true);
+        state.update(normalized_state_key(VK_MENU, 0x38, LLKHF_EXTENDED), true);
+        assert!(!is_shortcut_chord(&state));
+
+        state.update(VK_RMENU, false);
+        assert!(is_shortcut_chord(&state));
+    }
+
+    #[test]
+    fn generic_modifier_events_are_normalized_to_their_physical_side() {
+        assert_eq!(normalized_state_key(VK_SHIFT, 0x2a, 0), VK_LSHIFT);
+        assert_eq!(normalized_state_key(VK_SHIFT, 0x36, 0), VK_RSHIFT);
+        assert_eq!(
+            normalized_state_key(VK_CONTROL, 0x1d, LLKHF_EXTENDED),
+            VK_RCONTROL
+        );
+        assert_eq!(
+            normalized_state_key(VK_MENU, 0x38, LLKHF_EXTENDED),
+            VK_RMENU
+        );
     }
 }
