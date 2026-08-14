@@ -12,6 +12,8 @@ pub struct Config {
     pub hotkey: String,
     /// Start in Tibetan mode rather than disabled mode.
     pub enabled_on_start: bool,
+    /// Check GitHub Releases for a newer version after the app starts.
+    pub check_for_updates_on_startup: bool,
 }
 
 impl Default for Config {
@@ -19,6 +21,7 @@ impl Default for Config {
         Self {
             hotkey: "Shift+Space+Space".into(),
             enabled_on_start: false,
+            check_for_updates_on_startup: true,
         }
     }
 }
@@ -317,6 +320,7 @@ mod tests {
         let config = Config {
             hotkey: "Ctrl+Shift+Space".into(),
             enabled_on_start: true,
+            check_for_updates_on_startup: false,
         };
         let text = toml::to_string(&config).unwrap();
         let decoded: Config = toml::from_str(&text).unwrap();
@@ -328,6 +332,20 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.hotkey, "Shift+Space+Space");
         assert!(config.parsed_hotkey().is_ok());
+        assert!(config.check_for_updates_on_startup);
+    }
+
+    #[test]
+    fn existing_config_enables_startup_update_checks_by_default() {
+        let config: Config = toml::from_str(
+            r#"
+hotkey = "Shift+Space+Space"
+enabled_on_start = false
+"#,
+        )
+        .unwrap();
+
+        assert!(config.check_for_updates_on_startup);
     }
 
     fn shift() -> Modifiers {

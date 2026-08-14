@@ -1,10 +1,12 @@
 [package]
 name = "tibetan-ewts-keyboard"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
+build = "build.rs"
 license = "MIT OR Apache-2.0"
 description = "A Windows EWTS Tibetan keyboard with a configurable hotkey"
 readme = "README.md"
+repository = "https://github.com/bkntr/tibetan-keyboard"
 keywords = ["tibetan", "keyboard", "ewts", "transliteration", "windows"]
 categories = ["internationalization", "text-processing"]
 exclude = ["dist/"]
@@ -19,6 +21,7 @@ tray-icon = "0.21"
 winit = "0.30"
 
 [target.'cfg(windows)'.dependencies]
+self_update = { version = "=1.0.0-rc.6", default-features = false, features = ["checksums", "github", "native-tls", "reqwest"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
@@ -26,6 +29,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[build-dependencies]
+winresource = "0.1.31"
 
 [profile.release]
 lto = "thin"

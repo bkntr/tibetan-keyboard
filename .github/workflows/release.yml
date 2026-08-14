@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.architecture }} packages
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            architecture: x64
+          - target: aarch64-pc-windows-msvc
+            architecture: arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate tag and package version
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'tibetan-ewts-keyboard').version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME must match Cargo.toml version v$version."
+          }
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Select stable Rust and target
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add '${{ matrix.target }}'
+
+      - name: Build standalone executable
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' `
+            -OutFile $download
+          $signature = Get-AuthenticodeSignature -LiteralPath $download
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Pyrsys B.V.*') {
+            throw "Inno Setup installer signature is not valid: $($signature.Status)."
+          }
+          $process = Start-Process `
+            -FilePath $download `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Inno Setup installation failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Create standalone and installer packages
+        shell: pwsh
+        run: >-
+          ./scripts/package.ps1
+          -Target '${{ matrix.target }}'
+          -Architecture '${{ matrix.architecture }}'
+          -Version $env:APP_VERSION
+          -SkipBuild
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.architecture }}
+          path: dist/*.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: windows-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem release-assets -File -Filter '*.exe' |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content release-assets/SHA256SUMS.txt -Encoding ascii
+
+      - name: Publish release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $assets = Get-ChildItem release-assets -File | ForEach-Object FullName
+          $PSNativeCommandUseErrorActionPreference = $false
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME $assets --clobber
+          } else {
+            $arguments = @(
+              'release', 'create', $env:GITHUB_REF_NAME
+            ) + $assets + @(
+              '--verify-tag',
+              '--generate-notes',
+              '--title', "Tibetan EWTS Keyboard v$version"
+            )
+            if ($version.Contains('-')) {
+              $arguments += '--prerelease'
+            }
+            & gh @arguments
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to publish release $env:GITHUB_REF_NAME."
+          }

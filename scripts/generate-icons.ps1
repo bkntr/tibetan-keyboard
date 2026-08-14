@@ -108,6 +108,79 @@ function New-Preview {
     }
 }
 
+function New-WindowsIcon {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $sizes = @(16, 24, 32, 48, 64, 128, 256)
+    $sourceImage = [System.Drawing.Image]::FromFile($Source)
+    $frames = [System.Collections.Generic.List[object]]::new()
+
+    try {
+        foreach ($size in $sizes) {
+            $bitmap = [System.Drawing.Bitmap]::new(
+                $size,
+                $size,
+                [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+            )
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $memory = [System.IO.MemoryStream]::new()
+            try {
+                $graphics.Clear([System.Drawing.Color]::Transparent)
+                $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+                $graphics.DrawImage($sourceImage, 0, 0, $size, $size)
+                $bitmap.Save($memory, [System.Drawing.Imaging.ImageFormat]::Png)
+                $frames.Add([pscustomobject]@{
+                    Size = $size
+                    Bytes = $memory.ToArray()
+                })
+            }
+            finally {
+                $memory.Dispose()
+                $graphics.Dispose()
+                $bitmap.Dispose()
+            }
+        }
+    }
+    finally {
+        $sourceImage.Dispose()
+    }
+
+    $file = [System.IO.File]::Create($Destination)
+    $writer = [System.IO.BinaryWriter]::new($file)
+    try {
+        # ICONDIR: reserved, image type (1 = icon), image count.
+        $writer.Write([uint16]0)
+        $writer.Write([uint16]1)
+        $writer.Write([uint16]$frames.Count)
+
+        $offset = 6 + (16 * $frames.Count)
+        foreach ($frame in $frames) {
+            # An ICO width/height byte of zero represents 256 pixels.
+            $dimension = if ($frame.Size -eq 256) { 0 } else { $frame.Size }
+            $writer.Write([byte]$dimension)
+            $writer.Write([byte]$dimension)
+            $writer.Write([byte]0)
+            $writer.Write([byte]0)
+            $writer.Write([uint16]1)
+            $writer.Write([uint16]32)
+            $writer.Write([uint32]$frame.Bytes.Length)
+            $writer.Write([uint32]$offset)
+            $offset += $frame.Bytes.Length
+        }
+        foreach ($frame in $frames) {
+            $writer.Write([byte[]]$frame.Bytes)
+        }
+    }
+    finally {
+        $writer.Dispose()
+        $file.Dispose()
+    }
+}
+
 $enabled = Join-Path $assetDir 'om-enabled.png'
 $disabled = Join-Path $assetDir 'om-disabled.png'
 
@@ -124,5 +197,8 @@ New-Preview -Source $enabled -Destination (Join-Path $previewDir 'om-enabled-32.
 New-Preview -Source $disabled -Destination (Join-Path $previewDir 'om-disabled-32.png') -Size 32
 New-Preview -Source $enabled -Destination (Join-Path $assetDir 'om-enabled-tray.png') -Size 32
 New-Preview -Source $disabled -Destination (Join-Path $assetDir 'om-disabled-tray.png') -Size 32
+New-WindowsIcon `
+    -Source $enabled `
+    -Destination (Join-Path $assetDir 'tibetan-ewts-keyboard.ico')
 
 Write-Output "Rendered exact U+0F00 Tibetan OM tray assets in $assetDir"

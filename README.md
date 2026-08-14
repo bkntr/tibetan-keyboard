@@ -11,16 +11,24 @@ Type familiar Latin characters in any application and the keyboard converts them
 - Follows the active Windows keyboard layout, including AZERTY and QWERTZ
 - Toggles on and off with a global, customizable hotkey
 - Shows the current input state in the Windows system tray
-- Runs as a portable executable—no installation required
+- Offers both a per-user installer and a portable standalone executable
 - Provides native builds for x64 and ARM64 Windows devices
+- Verifies and installs architecture-matched updates from GitHub Releases
 
 ## Install
 
-1. Download the executable for your device from the [latest release](../../releases/latest):
-   - `windows-x64` for most Windows PCs
-   - `windows-arm64` for ARM-based Windows devices
-2. Move the executable to a location where you want to keep it.
-3. Run the executable. The Tibetan OM icon appears in the Windows system tray.
+1. Open the [latest release](../../releases/latest).
+2. Download the installer for your device:
+   - `windows-x64-setup.exe` for most Windows PCs
+   - `windows-arm64-setup.exe` for ARM-based Windows devices
+3. Run the installer. It installs for the current user without administrator access.
+
+For a portable copy, download the matching `standalone.exe` asset instead. The
+`x86_64-pc-windows-msvc` build is for x64 and the
+`aarch64-pc-windows-msvc` build is for ARM64. Move it to a writable location
+before running it so the built-in updater can replace it.
+
+The Tibetan OM icon appears in the Windows system tray after launch.
 
 Windows is currently the only supported operating system.
 
@@ -59,6 +67,7 @@ Right-click the tray icon to:
 - Enable or disable Tibetan input
 - Open the settings file in Notepad
 - Reload settings after editing them
+- Check for and install updates
 - Exit the application
 
 If the icon is not visible, check the system tray's hidden-icons menu.
@@ -76,6 +85,7 @@ The default settings are:
 ```toml
 hotkey = "Shift+Space+Space"
 enabled_on_start = false
+check_for_updates_on_startup = true
 ```
 
 After changing the file, save it and choose **Reload settings** from the tray menu. A changed `enabled_on_start` value takes effect the next time the application starts.
@@ -98,12 +108,25 @@ hotkey = "Shift+Space+Space"
 
 For a repeated hotkey, keep the modifiers held while pressing and releasing the main key the required number of times.
 
+## Updates
+
+The app checks the latest GitHub Release in the background after startup when
+`check_for_updates_on_startup` is enabled. It asks before downloading or
+installing anything and asks again before restarting. Startup network errors are
+silent; choose **Check for updates...** in the tray menu to run a visible check.
+
+Updates only select the standalone release asset for the app's current Rust
+target, so x64 and ARM64 builds cannot be mixed. Downloads are performed over
+HTTPS and are checked against the SHA-256 digest published by GitHub when that
+digest is available.
+
 ## Development
 
 ### Prerequisites
 
 - Windows
 - A current stable [Rust toolchain](https://www.rust-lang.org/tools/install) with Cargo
+- [Inno Setup 6](https://jrsoftware.org/isdl.php) to create installers locally
 
 Build and run a debug version:
 
@@ -118,6 +141,19 @@ cargo build --release
 ```
 
 The release executable is written to `target\release\tibetan-ewts-keyboard.exe`.
+
+Create both the standalone asset and installer for the native ARM64 target:
+
+```powershell
+.\scripts\package.ps1 `
+  -Target aarch64-pc-windows-msvc `
+  -Architecture arm64
+```
+
+Use `x86_64-pc-windows-msvc` and `x64` for the x64 packages. Outputs are
+written to `dist`. Pushing a tag such as `v0.2.0` whose version exactly matches
+`Cargo.toml` runs the release workflow, builds all four Windows assets, creates
+`SHA256SUMS.txt`, and publishes them to a GitHub Release.
 
 ### Checks
 
@@ -142,7 +178,10 @@ The end-to-end check launches the debug keyboard, sends input through its low-le
 src/config.rs       Settings and hotkey parsing
 src/composition.rs  Incremental EWTS composition
 src/windows_app.rs  Windows keyboard hook and tray application
+src/updater.rs      GitHub Releases update client
 scripts/e2e.ps1     End-to-end Windows input test
+scripts/package.ps1 Standalone and installer packaging
+installer/          Inno Setup definition
 assets/             Tray icon sources and generated sizes
 ```
 

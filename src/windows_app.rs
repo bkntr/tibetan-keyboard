@@ -1,3 +1,4 @@
+use crate::updater;
 use image::ImageReader;
 use std::{
     error::Error,
@@ -6,6 +7,7 @@ use std::{
     process::Command,
     ptr,
     sync::{Mutex, OnceLock},
+    thread,
 };
 use tibetan_ewts_keyboard::{
     composition::{Composer, Replacement},
@@ -25,10 +27,11 @@ use windows_sys::Win32::{
             VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT,
-            LLKHF_EXTENDED, MB_ICONERROR, MB_OK, MessageBoxW, SetWindowsHookExW,
-            UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-            WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+            CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, HHOOK, IDYES,
+            KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION,
+            MB_OK, MB_YESNO, MessageBoxW, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+            WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN,
+            WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
         },
     },
 };
@@ -41,6 +44,7 @@ use winit::{
 const MENU_TOGGLE: &str = "toggle";
 const MENU_OPEN_SETTINGS: &str = "open-settings";
 const MENU_RELOAD_SETTINGS: &str = "reload-settings";
+const MENU_CHECK_UPDATES: &str = "check-updates";
 const MENU_EXIT: &str = "exit";
 const INPUT_MARKER: usize = 0x4557_5453_4B42_4455;
 
@@ -48,6 +52,11 @@ const INPUT_MARKER: usize = 0x4557_5453_4B42_4455;
 enum UserEvent {
     Menu(MenuEvent),
     StateChanged(bool),
+    UpdateCheckFinished {
+        manual: bool,
+        result: Result<Option<String>, String>,
+    },
+    UpdateInstallFinished(Result<String, String>),
 }
 
 struct HookRuntime {
@@ -160,10 +169,13 @@ struct Application {
     config: Config,
     tray: Option<TrayIcon>,
     toggle_item: Option<MenuItem>,
+    update_item: Option<MenuItem>,
     enabled_icon: Icon,
     disabled_icon: Icon,
     keyboard_hook: HHOOK,
     mouse_hook: HHOOK,
+    proxy: EventLoopProxy<UserEvent>,
+    update_busy: bool,
 }
 
 impl Application {
@@ -176,7 +188,7 @@ impl Application {
                 keyboard_state: KeyboardState::new(),
                 consumed_keys: [false; 256],
                 enabled: config.enabled_on_start,
-                proxy,
+                proxy: proxy.clone(),
             }))
             .map_err(|_| "keyboard runtime was initialized more than once")?;
 
@@ -184,12 +196,15 @@ impl Application {
             config,
             tray: None,
             toggle_item: None,
+            update_item: None,
             // Use shell-size artwork rather than asking Windows to reduce the
             // 256px master all the way to a DPI-scaled tray slot.
             enabled_icon: load_icon(include_bytes!("../assets/om-enabled-tray.png"))?,
             disabled_icon: load_icon(include_bytes!("../assets/om-disabled-tray.png"))?,
             keyboard_hook: ptr::null_mut(),
             mouse_hook: ptr::null_mut(),
+            proxy,
+            update_busy: false,
         })
     }
 
@@ -215,12 +230,15 @@ impl Application {
         let open_settings = MenuItem::with_id(MENU_OPEN_SETTINGS, "Open settings…", true, None);
         let reload_settings =
             MenuItem::with_id(MENU_RELOAD_SETTINGS, "Reload settings", true, None);
+        let check_updates =
+            MenuItem::with_id(MENU_CHECK_UPDATES, "Check for updates...", true, None);
         let exit = MenuItem::with_id(MENU_EXIT, "Exit", true, None);
         menu.append_items(&[
             &toggle_item,
             &PredefinedMenuItem::separator(),
             &open_settings,
             &reload_settings,
+            &check_updates,
             &PredefinedMenuItem::separator(),
             &exit,
         ])?;
@@ -265,7 +283,11 @@ impl Application {
         }
 
         self.toggle_item = Some(toggle_item);
+        self.update_item = Some(check_updates);
         self.tray = Some(tray);
+        if self.config.check_for_updates_on_startup {
+            self.start_update_check(false);
+        }
         Ok(())
     }
 
@@ -309,6 +331,86 @@ impl Application {
         Ok(())
     }
 
+    fn set_update_busy(&mut self, busy: bool, label: &str) {
+        self.update_busy = busy;
+        if let Some(item) = &self.update_item {
+            item.set_text(label);
+            item.set_enabled(!busy);
+        }
+    }
+
+    fn start_update_check(&mut self, manual: bool) {
+        if self.update_busy {
+            return;
+        }
+        self.set_update_busy(true, "Checking for updates...");
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let result = updater::check();
+            let _ = proxy.send_event(UserEvent::UpdateCheckFinished { manual, result });
+        });
+    }
+
+    fn finish_update_check(&mut self, manual: bool, result: Result<Option<String>, String>) {
+        self.set_update_busy(false, "Check for updates...");
+        match result {
+            Ok(Some(version)) => {
+                let install = ask_yes_no(
+                    "Update available",
+                    &format!(
+                        "Tibetan EWTS Keyboard v{version} is available.\n\nDownload and install it now?"
+                    ),
+                );
+                if install {
+                    self.start_update_install(version);
+                }
+            }
+            Ok(None) if manual => show_message(
+                "No updates available",
+                &format!(
+                    "Tibetan EWTS Keyboard v{} is up to date.",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ),
+            Ok(None) => {}
+            Err(error) if manual => show_error("Unable to check for updates", &error),
+            Err(_) => {}
+        }
+    }
+
+    fn start_update_install(&mut self, version: String) {
+        self.set_update_busy(true, "Installing update...");
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let result = updater::install(&version);
+            let _ = proxy.send_event(UserEvent::UpdateInstallFinished(result));
+        });
+    }
+
+    fn finish_update_install(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        result: Result<String, String>,
+    ) {
+        self.set_update_busy(false, "Check for updates...");
+        match result {
+            Ok(version) => {
+                if ask_yes_no(
+                    "Update installed",
+                    &format!(
+                        "Tibetan EWTS Keyboard v{version} was installed.\n\nRestart now to use it?"
+                    ),
+                ) {
+                    match std::env::current_exe().and_then(|path| Command::new(path).spawn()) {
+                        Ok(_) => event_loop.exit(),
+                        Err(error) => show_error("Unable to restart", &error.to_string()),
+                    }
+                }
+            }
+            Err(error) => show_error("Unable to install update", &error),
+        }
+    }
+
     fn handle_menu(&mut self, event_loop: &ActiveEventLoop, event: MenuEvent) {
         match event.id.as_ref() {
             MENU_TOGGLE => self.toggle(),
@@ -322,6 +424,7 @@ impl Application {
                     show_error("Invalid settings", &error.to_string());
                 }
             }
+            MENU_CHECK_UPDATES => self.start_update_check(true),
             MENU_EXIT => event_loop.exit(),
             _ => {}
         }
@@ -355,6 +458,12 @@ impl ApplicationHandler<UserEvent> for Application {
         match event {
             UserEvent::Menu(event) => self.handle_menu(event_loop, event),
             UserEvent::StateChanged(enabled) => self.set_visual_state(enabled),
+            UserEvent::UpdateCheckFinished { manual, result } => {
+                self.finish_update_check(manual, result)
+            }
+            UserEvent::UpdateInstallFinished(result) => {
+                self.finish_update_install(event_loop, result)
+            }
         }
     }
 
@@ -426,6 +535,34 @@ pub fn show_error(title: &str, message: &str) {
             MB_OK | MB_ICONERROR,
         )
     };
+}
+
+fn show_message(title: &str, message: &str) {
+    let title = wide_null(title);
+    let message = wide_null(message);
+    // SAFETY: both strings are valid, NUL-terminated UTF-16 buffers.
+    unsafe {
+        MessageBoxW(
+            ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        )
+    };
+}
+
+fn ask_yes_no(title: &str, message: &str) -> bool {
+    let title = wide_null(title);
+    let message = wide_null(message);
+    // SAFETY: both strings are valid, NUL-terminated UTF-16 buffers.
+    unsafe {
+        MessageBoxW(
+            ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION,
+        ) == IDYES
+    }
 }
 
 fn wide_null(value: &str) -> Vec<u16> {

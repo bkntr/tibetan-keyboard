@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-14
+
+### Added
+
+- Per-user Inno Setup installers for x64 and ARM64 Windows.
+- A tag-driven GitHub release workflow that publishes standalone executables,
+  installers, and SHA-256 checksums for both architectures.
+- Background and manual GitHub Releases update checks, architecture-specific
+  in-place updates, download integrity verification, and restart prompts.
+
 ## [0.1.2] - 2026-08-14
 
 ### Fixed
