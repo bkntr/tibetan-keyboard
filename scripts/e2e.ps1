@@ -34,13 +34,28 @@ using System.Runtime.InteropServices;
 public static class TibetanEwtsTestInput
 {
     private const uint KeyUp = 0x0002;
+    private const uint MouseLeftDown = 0x0002;
+    private const uint MouseLeftUp = 0x0004;
 
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extraInfo);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
     public static void Down(byte key) { keybd_event(key, 0, 0, UIntPtr.Zero); }
     public static void Up(byte key) { keybd_event(key, 0, KeyUp, UIntPtr.Zero); }
     public static void Press(byte key) { Down(key); Up(key); }
+
+    public static void Click(int x, int y)
+    {
+        SetCursorPos(x, y);
+        mouse_event(MouseLeftDown, 0, 0, 0, UIntPtr.Zero);
+        mouse_event(MouseLeftUp, 0, 0, 0, UIntPtr.Zero);
+    }
 
     public static void ToggleTestHotkey()
     {
@@ -86,6 +101,8 @@ public static class TibetanEwtsTestInput
 
     $script:e2eStep = 0
     $script:replayPassed = $false
+    $script:keyboardText = $null
+    $script:mouseText = $null
     $timer = [System.Windows.Forms.Timer]::new()
     $timer.Interval = 650
     $timer.Add_Tick({
@@ -104,7 +121,23 @@ public static class TibetanEwtsTestInput
             3 {
                 [TibetanEwtsTestInput]::TypeTibetanSpacesAndUnsupportedLetter()
             }
+            4 {
+                $script:keyboardText = $box.Text
+                $box.Clear()
+                [TibetanEwtsTestInput]::Press(0x4E) # n
+            }
             5 {
+                $center = $box.PointToScreen(
+                    [System.Drawing.Point]::new($box.ClientSize.Width / 2, $box.ClientSize.Height / 2)
+                )
+                [TibetanEwtsTestInput]::Click($center.X, $center.Y)
+            }
+            6 {
+                $box.SelectionStart = 0
+                [TibetanEwtsTestInput]::Press(0x47) # g
+            }
+            7 {
+                $script:mouseText = $box.Text
                 $timer.Stop()
                 $form.Close()
             }
@@ -124,11 +157,16 @@ public static class TibetanEwtsTestInput
     if (-not $script:replayPassed) {
         throw 'An incomplete Shift+Space sequence was not replayed as a normal Space.'
     }
-    if ($box.Text -ne $expected) {
-        $actualCodes = ($box.Text.ToCharArray() | ForEach-Object { 'U+{0:X4}' -f [int]$_ }) -join ' '
-        throw "Expected '$expected', got '$($box.Text)' ($actualCodes)."
+    if ($script:keyboardText -ne $expected) {
+        $actualCodes = ($script:keyboardText.ToCharArray() | ForEach-Object { 'U+{0:X4}' -f [int]$_ }) -join ' '
+        throw "Expected '$expected', got '$script:keyboardText' ($actualCodes)."
     }
-    Write-Output "E2E passed: hotkey replay/toggle, Tibetan tsheg, x word space, and unsupported L suppression"
+    $expectedAfterMouseMove = -join @([char]0x0F42, [char]0x0F53)
+    if ($script:mouseText -ne $expectedAfterMouseMove) {
+        $actualCodes = ($script:mouseText.ToCharArray() | ForEach-Object { 'U+{0:X4}' -f [int]$_ }) -join ' '
+        throw "Expected mouse click to end composition and produce '$expectedAfterMouseMove', got '$script:mouseText' ($actualCodes)."
+    }
+    Write-Output "E2E passed: hotkey replay/toggle, Tibetan input behavior, and mouse-click composition reset"
 }
 finally {
     if ($keyboard -and (Get-Process -Id $keyboard.Id -ErrorAction SilentlyContinue)) {

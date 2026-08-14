@@ -27,7 +27,8 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT,
             LLKHF_EXTENDED, MB_ICONERROR, MB_OK, MessageBoxW, SetWindowsHookExW,
-            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+            WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
         },
     },
 };
@@ -161,7 +162,8 @@ struct Application {
     toggle_item: Option<MenuItem>,
     enabled_icon: Icon,
     disabled_icon: Icon,
-    hook: HHOOK,
+    keyboard_hook: HHOOK,
+    mouse_hook: HHOOK,
 }
 
 impl Application {
@@ -186,7 +188,8 @@ impl Application {
             // 256px master all the way to a DPI-scaled tray slot.
             enabled_icon: load_icon(include_bytes!("../assets/om-enabled-tray.png"))?,
             disabled_icon: load_icon(include_bytes!("../assets/om-disabled-tray.png"))?,
-            hook: ptr::null_mut(),
+            keyboard_hook: ptr::null_mut(),
+            mouse_hook: ptr::null_mut(),
         })
     }
 
@@ -236,7 +239,7 @@ impl Application {
         // SAFETY: `low_level_keyboard_proc` has the required ABI and remains
         // valid for the process lifetime. The winit event loop pumps messages
         // on this same thread until the hook is removed in `Drop`.
-        self.hook = unsafe {
+        self.keyboard_hook = unsafe {
             SetWindowsHookExW(
                 WH_KEYBOARD_LL,
                 Some(low_level_keyboard_proc),
@@ -244,8 +247,21 @@ impl Application {
                 0,
             )
         };
-        if self.hook.is_null() {
+        if self.keyboard_hook.is_null() {
             return Err("SetWindowsHookExW failed".into());
+        }
+
+        // A click can move the caret without producing a keyboard event. End
+        // the live EWTS span before the application handles that click so the
+        // next keystroke cannot replace text at the caret's new location.
+        self.mouse_hook = unsafe {
+            SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), ptr::null_mut(), 0)
+        };
+        if self.mouse_hook.is_null() {
+            // SAFETY: this is the hook handle returned just above.
+            unsafe { UnhookWindowsHookEx(self.keyboard_hook) };
+            self.keyboard_hook = ptr::null_mut();
+            return Err("SetWindowsHookExW failed for mouse hook".into());
         }
 
         self.toggle_item = Some(toggle_item);
@@ -314,10 +330,15 @@ impl Application {
 
 impl Drop for Application {
     fn drop(&mut self) {
-        if !self.hook.is_null() {
+        if !self.keyboard_hook.is_null() {
             // SAFETY: this is the hook handle returned by SetWindowsHookExW.
-            unsafe { UnhookWindowsHookEx(self.hook) };
-            self.hook = ptr::null_mut();
+            unsafe { UnhookWindowsHookEx(self.keyboard_hook) };
+            self.keyboard_hook = ptr::null_mut();
+        }
+        if !self.mouse_hook.is_null() {
+            // SAFETY: this is the hook handle returned by SetWindowsHookExW.
+            unsafe { UnhookWindowsHookEx(self.mouse_hook) };
+            self.mouse_hook = ptr::null_mut();
         }
     }
 }
@@ -409,6 +430,30 @@ pub fn show_error(title: &str, message: &str) {
 
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+unsafe extern "system" fn low_level_mouse_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0
+        && is_mouse_button_down(wparam)
+        && let Some(runtime_mutex) = HOOK_RUNTIME.get()
+        && let Ok(mut runtime) = runtime_mutex.lock()
+    {
+        runtime.composer.commit();
+    }
+
+    // SAFETY: forwarding the hook parameters is required by the hook contract.
+    unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
+}
+
+fn is_mouse_button_down(message: WPARAM) -> bool {
+    matches!(
+        message as u32,
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+    )
 }
 
 unsafe extern "system" fn low_level_keyboard_proc(
@@ -830,5 +875,16 @@ mod tests {
             normalized_state_key(VK_MENU, 0x38, LLKHF_EXTENDED),
             VK_RMENU
         );
+    }
+
+    #[test]
+    fn mouse_button_presses_end_composition() {
+        assert!(is_mouse_button_down(WM_LBUTTONDOWN as usize));
+        assert!(is_mouse_button_down(WM_RBUTTONDOWN as usize));
+        assert!(is_mouse_button_down(WM_MBUTTONDOWN as usize));
+        assert!(is_mouse_button_down(WM_XBUTTONDOWN as usize));
+        assert!(!is_mouse_button_down(
+            windows_sys::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE as usize
+        ));
     }
 }
