@@ -1,4 +1,4 @@
-# Tibetan EWTS Keyboard
+# Tibetan Wylie/EWTS Keyboard
 
 A lightweight Windows tray application for typing Unicode Tibetan with
 [Extended Wylie Transliteration (EWTS)](https://en.wikipedia.org/wiki/Wylie_transliteration#Extensions).
