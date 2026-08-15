@@ -56,7 +56,7 @@ The keyboard accepts standard EWTS input and replaces it with Unicode Tibetan in
 | --- | --- |
 | `sangs rgyas` | `སངས་རྒྱས` |
 | `oM` | `ཨོཾ` |
-| `bka' brgyud` | `བཀའ་བརྒྱུད` |
+| `graa` (or `grA`) | `གྲཱ` |
 
 A space ends the current syllable and produces a Tibetan tsheg (`་`). Use `x` or an underscore (`_`) when you want a regular word space instead. Latin letters that are not part of EWTS are ignored while Tibetan input is enabled.
 

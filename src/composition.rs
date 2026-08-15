@@ -49,7 +49,7 @@ impl Composer {
         debug_assert!(ch.is_ascii());
         let old_len = self.rendered.chars().count();
         self.source.push(ch);
-        self.rendered = self.converter.ewts_to_unicode(&self.source);
+        self.rendered = convert_ewts(&self.converter, &self.source);
         let edit = Replacement {
             backspaces: old_len,
             text: self.rendered.clone(),
@@ -67,7 +67,7 @@ impl Composer {
     pub fn backspace(&mut self) -> Option<Replacement> {
         self.source.pop()?;
         let old_len = self.rendered.chars().count();
-        self.rendered = self.converter.ewts_to_unicode(&self.source);
+        self.rendered = convert_ewts(&self.converter, &self.source);
         Some(Replacement {
             backspaces: old_len,
             text: self.rendered.clone(),
@@ -79,6 +79,51 @@ impl Composer {
         self.source.clear();
         self.rendered.clear();
     }
+}
+
+fn convert_ewts(converter: &EwtsConverter, source: &str) -> String {
+    converter.ewts_to_unicode(&normalize_long_vowels(source))
+}
+
+/// Accept the doubled long-vowel spellings used by Tise and Denjong.
+///
+/// Bracketed non-EWTS text and backslash-escaped characters retain their
+/// literal spelling.
+fn normalize_long_vowels(source: &str) -> String {
+    let mut normalized = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut bracket_depth = 0_usize;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                normalized.push(ch);
+                if let Some(escaped) = chars.next() {
+                    normalized.push(escaped);
+                }
+            }
+            '[' => {
+                bracket_depth += 1;
+                normalized.push(ch);
+            }
+            ']' if bracket_depth > 0 => {
+                bracket_depth -= 1;
+                normalized.push(ch);
+            }
+            'a' | 'i' | 'u' if bracket_depth == 0 && chars.peek() == Some(&ch) => {
+                chars.next();
+                normalized.push(match ch {
+                    'a' => 'A',
+                    'i' => 'I',
+                    'u' => 'U',
+                    _ => unreachable!(),
+                });
+            }
+            _ => normalized.push(ch),
+        }
+    }
+
+    normalized
 }
 
 /// Characters whose EWTS meaning finishes a composition span.
@@ -97,6 +142,42 @@ mod tests {
         assert_eq!(converter.ewts_to_unicode("oM"), "ཨོཾ");
         assert_eq!(converter.ewts_to_unicode("bka' brgyud"), "བཀའ་བརྒྱུད");
         assert_eq!(converter.ewts_to_unicode("grA"), "གྲཱ");
+    }
+
+    #[test]
+    fn accepts_tise_and_denjong_long_vowel_aliases() {
+        for (alias, canonical) in [("graa", "grA"), ("grii", "grI"), ("gruu", "grU")] {
+            let mut alias_composer = Composer::default();
+            for ch in alias.chars() {
+                alias_composer.push(ch);
+            }
+
+            let converter = EwtsConverter::create();
+            assert_eq!(
+                alias_composer.rendered(),
+                converter.ewts_to_unicode(canonical)
+            );
+        }
+    }
+
+    #[test]
+    fn long_vowel_aliases_do_not_change_literal_text() {
+        assert_eq!(
+            normalize_long_vowels("graa [graa grii gruu] \\aauu"),
+            "grA [graa grii gruu] \\aaU"
+        );
+    }
+
+    #[test]
+    fn backspace_reverts_a_doubled_long_vowel() {
+        let mut composer = Composer::default();
+        for ch in "graa".chars() {
+            composer.push(ch);
+        }
+
+        let edit = composer.backspace().unwrap();
+        assert_eq!(composer.source(), "gra");
+        assert_eq!(edit.text, "གྲ");
     }
 
     #[test]
