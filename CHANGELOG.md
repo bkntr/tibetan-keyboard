@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-15
+
+### Fixed
+
+- Preserve active EWTS composition while using Shift or Caps Lock, allowing
+  capital tokens such as long vowels to apply to the current Tibetan stack.
+
 ## [0.2.0] - 2026-08-14
 
 ### Added

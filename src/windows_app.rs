@@ -686,6 +686,8 @@ unsafe extern "system" fn low_level_keyboard_proc(
                 } else {
                     !runtime.composer.is_empty()
                 }
+            } else if is_composition_preserving_state_key(key) {
+                false
             } else if is_modifier_key(key) {
                 if is_down {
                     runtime.composer.commit();
@@ -907,6 +909,13 @@ fn is_supported_ewts_letter(ch: char) -> bool {
     "abcdefghijklmnoprstuvwyzADHIMNRSTUWXY".contains(ch)
 }
 
+fn is_composition_preserving_state_key(key: u16) -> bool {
+    // Shift is required to type EWTS capitals such as the long vowels A, I,
+    // and U; Caps Lock can produce the same tokens. Changing either state
+    // must not detach the next token from the active Tibetan stack.
+    matches!(key, VK_SHIFT | VK_LSHIFT | VK_RSHIFT | VK_CAPITAL)
+}
+
 fn send_replacement(edit: &Replacement) {
     let mut inputs = Vec::with_capacity(edit.backspaces * 2 + edit.text.len() * 2);
     for _ in 0..edit.backspaces {
@@ -987,6 +996,17 @@ mod tests {
         assert!(state.is_down(VK_SHIFT));
         state.update(VK_LSHIFT, false);
         assert!(!state.modifiers().shift);
+    }
+
+    #[test]
+    fn capitalization_keys_keep_the_ewts_composition_active() {
+        assert!(is_composition_preserving_state_key(VK_SHIFT));
+        assert!(is_composition_preserving_state_key(VK_LSHIFT));
+        assert!(is_composition_preserving_state_key(VK_RSHIFT));
+        assert!(is_composition_preserving_state_key(VK_CAPITAL));
+        assert!(!is_composition_preserving_state_key(VK_CONTROL));
+        assert!(!is_composition_preserving_state_key(VK_MENU));
+        assert!(!is_composition_preserving_state_key(VK_LWIN));
     }
 
     #[test]

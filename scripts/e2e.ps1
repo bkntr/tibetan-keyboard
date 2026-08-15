@@ -84,6 +84,20 @@ public static class TibetanEwtsTestInput
         Down(0x10);
         Press(0x4C); // unsupported L -> suppressed
         Up(0x10);
+
+        Press(0x47); // g
+        Press(0x52); // r
+        Down(0x10);
+        Press(0x41); // A -> long vowel on the active gr stack
+        Up(0x10);
+        Press(0x58); // finish the stack with a regular word space
+
+        Press(0x47); // g
+        Press(0x52); // r
+        Press(0x14); // Caps Lock on
+        Press(0x41); // a key -> uppercase A
+        Press(0x14); // Caps Lock off
+        Press(0x58); // finish the stack with a regular word space
     }
 }
 '@
@@ -152,6 +166,14 @@ public static class TibetanEwtsTestInput
         [char]0x0F7E,
         [char]0x0F0B,
         [char]0x0F40,
+        ' ',
+        [char]0x0F42,
+        [char]0x0FB2,
+        [char]0x0F71,
+        ' ',
+        [char]0x0F42,
+        [char]0x0FB2,
+        [char]0x0F71,
         ' '
     )
     if (-not $script:replayPassed) {

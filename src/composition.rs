@@ -96,6 +96,7 @@ mod tests {
         assert_eq!(converter.ewts_to_unicode("sangs rgyas"), "སངས་རྒྱས");
         assert_eq!(converter.ewts_to_unicode("oM"), "ཨོཾ");
         assert_eq!(converter.ewts_to_unicode("bka' brgyud"), "བཀའ་བརྒྱུད");
+        assert_eq!(converter.ewts_to_unicode("grA"), "གྲཱ");
     }
 
     #[test]
