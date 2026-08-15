@@ -60,6 +60,9 @@ The keyboard accepts standard EWTS input and replaces it with Unicode Tibetan in
 
 A space ends the current syllable and produces a Tibetan tsheg (`་`). Use `x` or an underscore (`_`) when you want a regular word space instead. Latin letters that are not part of EWTS are ignored while Tibetan input is enabled.
 
+See the [complete conversion reference](REFERENCE.md) for every supported
+consonant, vowel, mark, symbol, and stacking rule.
+
 ## Tray menu
 
 Right-click the tray icon to:
